@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2025 AstroLab Software
+# Copyright 2025-2026 AstroLab Software
 # Author: Julien Peloton
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +20,7 @@ import pyspark.sql.functions as F
 from pyspark.sql.functions import struct, lit
 from pyspark.sql.functions import pandas_udf, PandasUDFType
 from pyspark.sql.types import StringType
+from pyspark.sql.utils import AnalysisException
 
 from fink_filters.ztf.classification import extract_fink_classification
 from fink_utils.spark import schema_converter
@@ -154,9 +155,11 @@ def add_classification(spark, df, path_to_tns):
         sub_pdf["TNS"][sep_constraint2] = type2.to_numpy()[idx2[sep_constraint2]]
 
         to_return = objectid.apply(
-            lambda x: "Unknown"
-            if x not in sub_pdf["objectId"].to_numpy()
-            else sub_pdf["TNS"][sub_pdf["objectId"] == x].to_numpy()[0]
+            lambda x: (
+                "Unknown"
+                if x not in sub_pdf["objectId"].to_numpy()
+                else sub_pdf["TNS"][sub_pdf["objectId"] == x].to_numpy()[0]
+            )
         )
 
         return to_return
@@ -413,7 +416,12 @@ def main(args):
         spark.stop()
         sys.exit(1)
 
-    df = spark.read.format("parquet").option("basePath", args.basePath).load(paths)
+    df = (
+        spark.read.format("parquet")
+        .option("basePath", args.basePath)
+        .option("mergeSchema", True)
+        .load(paths)
+    )
 
     df = add_classification(spark, df, args.path_to_tns)
 
@@ -444,6 +452,24 @@ def main(args):
 
     # enforce proper serialisation
     cnames = sanitize_fields(cnames)
+
+    # Check fields exist
+    for cname in cnames:
+        try:
+            df.selectExpr(cname)
+        except AnalysisException:  # noqa: PERF203
+            log.warning(
+                "Removing {} from the list of fields as it is not available for the selected dates. Check https://doc.ztf.fink-broker.org/en/latest/broker/science_modules/ for availability".format(
+                    cname
+                )
+            )
+            cnames.remove(cname)
+
+    if len(cnames) == 0:
+        log.error(
+            "No alert fields have been selected. Restart the job by choosing at least one field."
+        )
+        sys.exit(1)
 
     # Wrap alert data
     df = df.selectExpr(cnames)
